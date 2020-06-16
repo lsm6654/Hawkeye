@@ -3,17 +3,11 @@ from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
 
-# 한국거래소에서 종목코드 가져오기
-corp_list = pd.read_html('http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13', header=0)[0]
-corp_list = corp_list.rename(columns={'회사명': 'name', '종목코드': 'code'})
-corp_list.code = corp_list.code.map('{:06d}'.format)
-corp_list = corp_list[['name', 'code']]
-
 # Naver Finance 에서 재무제표 Crawling
 url_tmpl = 'https://finance.naver.com/item/main.nhn?code=%s'
 url = url_tmpl % '005930'
 
-item_info = requests.get(url).text
+item_info = requests.get(url, verify=False).text
 soup = BeautifulSoup(item_info, 'html.parser')
 finance_info = soup.select('div.section.cop_analysis div.sub_section')[0]
 
@@ -39,6 +33,12 @@ def get_url(corp_name, corp_list):
     print("요청 URL = {}".format(target_url))
     return target_url
 
+
+# 한국거래소에서 종목코드 가져오기
+corp_list = pd.read_html('http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13', header=0)[0]
+corp_list = corp_list.rename(columns={'회사명': 'name', '종목코드': 'code'})
+corp_list.code = corp_list.code.map('{:06d}'.format)
+corp_list = corp_list[['name', 'code']]
 
 corp_name = '삼성생명'
 url = get_url(corp_name, corp_list)

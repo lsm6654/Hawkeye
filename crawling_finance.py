@@ -1,4 +1,3 @@
-import asyncio
 import os
 import requests
 from bs4 import BeautifulSoup
@@ -8,13 +7,12 @@ import pymysql as mysql
 import time
 from sqlalchemy import create_engine
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
-from concurrent.futures import ProcessPoolExecutor
 from random import randint
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
-# 한국거래소에서 종목코드 가져오기
+# 한국거래소에서 전체 상장법인목록 가져오기
 def get_krx_corp_list():
     corp_list = pd.read_html('http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13', header=0)[0]
     corp_list = corp_list.rename(columns={'업종': 'sector',
@@ -27,6 +25,32 @@ def get_krx_corp_list():
     corp_list = corp_list.sort_values(by=['sector', 'name'], axis=0)
 
     return corp_list
+
+
+# 한국거래소에서 코스닥 상장법인목록 가져오기
+def get_krx_kosdaq_corp_list():
+    corp_list = \
+    pd.read_html('http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13&marketType=kosdaqMkt',
+                 header=0)[0]
+    corp_list = corp_list.rename(columns={'업종': 'sector',
+                                          '회사명': 'name',
+                                          '종목코드': 'code',
+                                          '주요제품': 'product',
+                                          '결산월': 'settle'})
+    corp_list.code = corp_list.code.map('{:06d}'.format)
+    corp_list = corp_list[['name', 'code', 'sector', 'product', 'settle']]
+    corp_list = corp_list.sort_values(by=['sector', 'name'], axis=0)
+
+    return corp_list
+
+
+# 코스닥 상장법인 목록 가져온 후 DB 에 저장
+def insert_krx_kosdaq_corp_list():
+    kosdaq_corp_list_df = get_krx_kosdaq_corp_list()
+    engine = create_engine("mysql+pymysql://logan:logan@localhost:3306/finance?charset=utf8", echo=True)
+    conn = engine.connect()
+    kosdaq_corp_list_df.to_sql(name='kosdaq_corp', con=engine, if_exists='append', index=False)
+    conn.close()
 
 
 # DB 에서 종목코드 가져오기
@@ -130,7 +154,7 @@ def pivoting_df(df):
 
 
 def prepare_insert(df, corp_name):
-    code = corp_list_df.query("name=='{}'".format(corp_name))['code'].to_string(index=False)
+    code = df.query("name=='{}'".format(corp_name))['code'].to_string(index=False)
     df['corp_code'] = code
     df['corp_name'] = corp_name
     df['fiscal_period'] = df.index.str.replace(r'\D+', '')
@@ -206,7 +230,7 @@ def insert_all_corp_financial_stat(df_list):
             insert_financial_stat(p_annual_df)
             insert_financial_stat(p_quarter_df)
 
-            print("{1} out of {0} left.".format(len(corp_list_df), len(corp_list_df) - i - 1))
+            print("{1} out of {0} left.".format(len(df_list), len(df_list) - i - 1))
             print("Waiting for getting the next corporate Financial Statement...")
 
         time.sleep(5)
@@ -240,30 +264,32 @@ def insert_one_corp_financial_stat(corp_info):
         time.sleep(randint(10, 15))
 
 
+# 코스닥 상장법인 정보 삭제
+def delete_kosdaq_from_financial_stat():
+    conn = mysql.connect(host='localhost', user='logan', password='logan', db='finance', charset='utf8')
+    sql = "select code from kosdaq_corp"
+    results_df = pd.read_sql(sql, conn)
+
+    try:
+        mycur = conn.cursor()
+
+        for i, row in results_df.iterrows():
+            code = row['code']
+            sql = 'delete from financial_statement_kospi where corp_code = "{}"'.format(code)
+            mycur.execute(sql)
+            time.sleep(1)
+    except Exception:
+        print("ERROR")
+    finally:
+        conn.commit()
+        conn.close()
+
+
 # def main():
 # 전체 상장법인 목록 가져오기
-corp_list_df = get_db_corp_list()
+# corp_list_df = get_db_corp_list()
 
-# Multiprocessing
-"""
-Using ProcessPoolExecutor
-"The ProcessPoolExecutor class is an Executor subclass that uses a pool of processes to execute calls asynchronously.
-ProcessPoolExecutor uses the multiprocessing module, which allows it to side-step the Global Interpreter Lock 
-but also means that only picklable objects can be executed and returned."
-"""
-async def main(loop):
-    print('entering main')
-    executor = ProcessPoolExecutor(max_workers=3)
-    data = await asyncio.gather(*(loop.run_in_executor(executor, insert_one_corp_financial_stat, row)
-                                  for i, row in corp_list_df.iterrows()))
-    print('got result', data)
-    print('leaving main')
-
-
-loop = asyncio.get_event_loop()
-loop.run_until_complete(main(loop))
-
-# 전체 상장법인 재무제표 crawling 후 DB 에 저장
+# (Single processing)전체 상장법인 재무제표 crawling 후 DB 에 저장
 # insert_all_corp_financial_stat(corp_list_df)
 
 # 특정기업 재무제표 가져오기
@@ -288,5 +314,25 @@ loop.run_until_complete(main(loop))
 # 동종업종 기업리스트 가져오기
 # sector_corp_df = get_naver_sector_corp_list(html)
 
-if __name__ == "__main__":
-    main()
+
+# (Multi processing) 전체 상장법인 재무제표 crawling 후 DB 에 저장
+"""
+Using ProcessPoolExecutor
+"The ProcessPoolExecutor class is an Executor subclass that uses a pool of processes to execute calls asynchronously.
+ProcessPoolExecutor uses the multiprocessing module, which allows it to side-step the Global Interpreter Lock 
+but also means that only picklable objects can be executed and returned."
+"""
+# async def main(loop):
+#     print('entering main')
+#     executor = ProcessPoolExecutor(max_workers=3)
+#     data = await asyncio.gather(*(loop.run_in_executor(executor, insert_one_corp_financial_stat, row)
+#                                   for i, row in corp_list_df.iterrows()))
+#     print('got result', data)
+#     print('leaving main')
+#
+#
+# loop = asyncio.get_event_loop()
+# loop.run_until_complete(main(loop))
+
+# if __name__ == "__main__":
+#     main()
